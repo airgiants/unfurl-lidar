@@ -37,6 +37,21 @@
 #include <algorithm>
 #include <cctype>
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+
+#include <linux/can.h>
+#include <linux/can/raw.h>
+
+//#include "lib.h"
+
+
 #include "rollingAverage.h"
 
 using namespace std;
@@ -47,8 +62,109 @@ using namespace ydlidar;
 #endif
 
 
+// must match values from canid.h
+#define CAN_MESSAGE_LIDAR_START             0x090000  // lidar data scan start/end
+
+#define CAN_MESSAGE_LIDAR_PERSON            0x0c0000  // angle, range of a person
+
+
 #define NUM_BACKGROUND 1024 // less than the number of points we get
 RollingAverage background[NUM_BACKGROUND];
+
+int canSocket; /* can raw socket */
+
+int connectCan()
+{
+ 
+int enable_canfd = 1;
+	struct sockaddr_can addr;
+	
+	struct ifreq ifr;
+
+/* open socket */
+	if ((canSocket = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0) {
+		perror("socket");
+		return 1;
+	}
+
+
+strncpy(ifr.ifr_name, "SOME_KIND_OF_CAN_SOCKET", IFNAMSIZ - 1);
+	ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+	ifr.ifr_ifindex = if_nametoindex(ifr.ifr_name);
+	if (!ifr.ifr_ifindex) {
+		perror("if_nametoindex");
+		return 1;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.can_family = AF_CAN;
+	addr.can_ifindex = ifr.ifr_ifindex;
+
+  /* disable default receive filter on this RAW socket */
+	/* This is obsolete as we do not read from the socket at all, but for */
+	/* this reason we can remove the receive list in the Kernel to save a */
+	/* little (really a very little!) CPU usage.                          */
+	setsockopt(canSocket, SOL_CAN_RAW, CAN_RAW_FILTER, NULL, 0);
+
+	if (bind(canSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		perror("bind");
+		return 1;
+	}
+
+}
+
+
+
+bool sendCanStart( bool isStart )
+{
+
+  struct canfd_frame frame;
+
+  frame.can_id = CAN_EFF_FLAG | CAN_MESSAGE_LIDAR_START;
+  frame.data[0] = isStart;
+  frame.len = 1;
+  
+  int required_mtu = sizeof( canfd_frame );
+
+	/* send frame */
+	if (write(canSocket, &frame, required_mtu) != required_mtu) {
+		perror("write");
+		return 1;
+	}
+
+  return 0;
+}
+
+bool sendCanPerson( float angle, float width, float range)
+{
+  struct canfd_frame frame;
+
+  frame.can_id = CAN_EFF_FLAG | CAN_MESSAGE_LIDAR_PERSON;
+  frame.data[0] = (uint8_t)(angle*256.0/(2.0*M_PI));
+  
+  
+  if( width > 10.0 )
+    width = 10.0;
+
+  frame.data[1] = (uint8_t)(width*256.0/(10.0));
+
+  if( range > 30.0 )
+    range = 30.0;
+
+  frame.data[1] = (uint8_t)(range*256.0/(30.0));
+  frame.len = 3;
+  
+  int required_mtu = sizeof( canfd_frame );
+
+	/* send frame */
+	if (write(canSocket, &frame, required_mtu) != required_mtu) {
+		perror("write");
+		return 1;
+	}
+
+  return 0;
+}
+
 
 float normaliseAngle( float a)
 {
@@ -282,16 +398,21 @@ void processClusters( LaserScan *scan)
 
   
 
+  sendCanStart(true);
   for(Cluster c:clusters)
   {
+    sendCanPerson(c.angle(), c.width(), c.meanRange());
+
     printf("  angle %0.4f (%f to %f) rad width %0.4fm range %0.2fm background at %0.2fm\n", c.angle(), c.startAngle, c.endAngle, c.width(), c.meanRange(), c.backgroundRange());
     if( n++ > 20 )
     {
       printf("   ..... \n\n");
     }
   }
+  sendCanStart(false);
               
 }
+
 
 
 void processScan( LaserScan *scan)
@@ -326,6 +447,9 @@ int main(int argc, char *argv[]) {
   printf(" unfurl-lidar \n");
   printf("\n");
   fflush(stdout);
+
+  connectCan();
+
   std::string port;
   ydlidar::os_init();
 
@@ -548,7 +672,7 @@ int main(int argc, char *argv[]) {
   while (ret && ydlidar::os_isOk()) {
     if (laser.doProcessSimple(scan)) {
       fprintf(stdout, "Scan received[%llu]: %u ranges is [%f]Hz\n",
-              scan.stamp,
+              (long long unsigned int) scan.stamp,
               (unsigned int)scan.points.size(), 1.0 / scan.config.scan_time);
       processScan(&scan);
       fflush(stdout);
