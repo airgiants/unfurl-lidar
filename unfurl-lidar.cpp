@@ -127,19 +127,25 @@ bool sendCanStart( bool isStart )
   if( ! gotCan )
     return 1;
 
-  struct canfd_frame frame;
+  struct can_frame frame;
 
   frame.can_id = CAN_EFF_FLAG | CAN_MESSAGE_LIDAR_START;
+  //frame.flags=0;
   frame.data[0] = isStart;
-  frame.len = 1;
+  frame.can_dlc = 1;
   
-  int required_mtu = sizeof( canfd_frame );
+  int required_mtu = sizeof( can_frame );
+
+
+  int sent_mtu;
 
 	/* send frame */
-	if (write(canSocket, &frame, required_mtu) != required_mtu) {
+	if ((sent_mtu=write(canSocket, &frame, required_mtu)) != required_mtu) {
+    printf("sent_mtu %d\n",sent_mtu);
 		perror("CAN failure - write");
 		return 1;
 	}
+
 
   return 0;
 }
@@ -149,9 +155,10 @@ bool sendCanPerson( float angle, float width, float range)
   if( ! gotCan )
     return 1;
 
-  struct canfd_frame frame;
+  struct can_frame frame;
 
   frame.can_id = CAN_EFF_FLAG | CAN_MESSAGE_LIDAR_PERSON;
+
   frame.data[0] = (uint8_t)(angle*256.0/(2.0*M_PI));
   
   
@@ -163,13 +170,17 @@ bool sendCanPerson( float angle, float width, float range)
   if( range > 30.0 )
     range = 30.0;
 
-  frame.data[1] = (uint8_t)(range*256.0/(30.0));
-  frame.len = 3;
+  frame.data[2] = (uint8_t)(range*256.0/(30.0));
+
+  frame.can_dlc = 3;
   
-  int required_mtu = sizeof( canfd_frame );
+  int required_mtu = sizeof( can_frame );
+
+  int sent_mtu;
 
 	/* send frame */
-	if (write(canSocket, &frame, required_mtu) != required_mtu) {
+	if ((sent_mtu=write(canSocket, &frame, required_mtu)) != required_mtu) {
+    printf("sent_mtu %d\n",sent_mtu);
 		perror("CAN failure - write");
 		return 1;
 	}
@@ -466,6 +477,9 @@ int main(int argc, char *argv[]) {
   fflush(stdout);
 
   connectCan();
+
+  sendCanStart(true);
+  sendCanStart(false);
 
   std::string port;
   ydlidar::os_init();
