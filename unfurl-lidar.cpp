@@ -61,6 +61,8 @@ using namespace ydlidar;
 #pragma comment(lib, "ydlidar_sdk.lib")
 #endif
 
+bool traceClusters = false;
+
 
 // must match values from canid.h
 #define CAN_MESSAGE_LIDAR_START             0x090000  // lidar data scan start/end
@@ -72,27 +74,30 @@ using namespace ydlidar;
 RollingAverage background[NUM_BACKGROUND];
 
 int canSocket; /* can raw socket */
+bool gotCan = false;
 
 int connectCan()
 {
  
-int enable_canfd = 1;
+  gotCan = false;
+
+  int enable_canfd = 1;
 	struct sockaddr_can addr;
 	
 	struct ifreq ifr;
 
 /* open socket */
 	if ((canSocket = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0) {
-		perror("socket");
+		perror("CAN failure - socket");
 		return 1;
 	}
 
 
-strncpy(ifr.ifr_name, "SOME_KIND_OF_CAN_SOCKET", IFNAMSIZ - 1);
+strncpy(ifr.ifr_name, "vcan0", IFNAMSIZ - 1);
 	ifr.ifr_name[IFNAMSIZ - 1] = '\0';
 	ifr.ifr_ifindex = if_nametoindex(ifr.ifr_name);
 	if (!ifr.ifr_ifindex) {
-		perror("if_nametoindex");
+		perror("CAN failure - if_nametoindex");
 		return 1;
 	}
 
@@ -111,12 +116,16 @@ strncpy(ifr.ifr_name, "SOME_KIND_OF_CAN_SOCKET", IFNAMSIZ - 1);
 		return 1;
 	}
 
+  gotCan = true;
 }
 
 
 
 bool sendCanStart( bool isStart )
 {
+
+  if( ! gotCan )
+    return 1;
 
   struct canfd_frame frame;
 
@@ -128,7 +137,7 @@ bool sendCanStart( bool isStart )
 
 	/* send frame */
 	if (write(canSocket, &frame, required_mtu) != required_mtu) {
-		perror("write");
+		perror("CAN failure - write");
 		return 1;
 	}
 
@@ -137,6 +146,9 @@ bool sendCanStart( bool isStart )
 
 bool sendCanPerson( float angle, float width, float range)
 {
+  if( ! gotCan )
+    return 1;
+
   struct canfd_frame frame;
 
   frame.can_id = CAN_EFF_FLAG | CAN_MESSAGE_LIDAR_PERSON;
@@ -158,7 +170,7 @@ bool sendCanPerson( float angle, float width, float range)
 
 	/* send frame */
 	if (write(canSocket, &frame, required_mtu) != required_mtu) {
-		perror("write");
+		perror("CAN failure - write");
 		return 1;
 	}
 
@@ -266,7 +278,7 @@ void startCluster(LaserPoint p, float na)
   inCluster = true;
   clusterPoints = 1;
   
-  printf("\nstarted cluster at %0.4f rad, %0.4f m\n", clusterStart, clusterStartRange);
+  if( traceClusters) printf("\nstarted cluster at %0.4f rad, %0.4f m\n", clusterStart, clusterStartRange);
 
 }
 
@@ -287,7 +299,7 @@ void extendCluster(LaserPoint p, float na)
   
   clusterPoints++;
 
-  printf("    extended cluster starting at %0.4f to %0.4f rad %d points\n", clusterStart, clusterEnd,clusterPoints);
+  if( traceClusters) printf("    extended cluster starting at %0.4f to %0.4f rad %d points\n", clusterStart, clusterEnd,clusterPoints);
 
 }
 
@@ -297,16 +309,16 @@ void endCluster()
 {
   inCluster = false;
   if( clusterPoints < 2 ){
-    printf("    abandoned cluster - only %d points\n", clusterPoints);
+    if( traceClusters) printf("    abandoned cluster - only %d points\n", clusterPoints);
 
     return;
   }
 
   
   float clusterWidth = clusterStartRange * (clusterEnd-clusterStart);  // in m
-  if( clusterWidth < 0.01 || clusterWidth > 2.0 )  // discard clusters with silly sizes
+  if( clusterWidth < 0.25 || clusterWidth > 2.0 )  // discard clusters with silly sizes
   {
-    printf("    abandoned cluster %0.4f->%0.4f with %d points - bad width %0.4f m\n", clusterStart, clusterEnd, clusterPoints, clusterWidth);
+    if( traceClusters) printf("    abandoned cluster %0.4f->%0.4f with %d points - bad width %0.4f m\n", clusterStart, clusterEnd, clusterPoints, clusterWidth);
 
     return;
   }
@@ -315,7 +327,7 @@ void endCluster()
   numClusters ++;
 
   
-  printf("    made cluster - %d points\n", clusterPoints);
+  if( traceClusters) printf("    made cluster - %d points\n", clusterPoints);
   clusters.push_back( Cluster( clusterMinRange, clusterMaxRange, clusterStart, clusterEnd));
 }
 
@@ -356,7 +368,7 @@ void processClusters( LaserScan *scan)
       if( p.range > backgroundLimit)  
       {
         if( ! inBackground )
-          printf(" ---\n");
+          if( traceClusters) printf(" ---\n");
 
         inBackground = true;
 
@@ -368,7 +380,7 @@ void processClusters( LaserScan *scan)
       {
         inBackground = false;
 
-        printf("    angle %f %f, delta %f, range %f (bg %f) intensity %f\n", p.angle, na, na-lastAngle, p.range, backgroundLimit, p.intensity);
+        if( traceClusters) printf("    angle %f %f, delta %f, range %f (bg %f) intensity %f\n", p.angle, na, na-lastAngle, p.range, backgroundLimit, p.intensity);
 
         if( ! inCluster )
           startCluster(p, na);
@@ -390,7 +402,7 @@ void processClusters( LaserScan *scan)
   if( inCluster )
         endCluster();
 
-  printf("%d points\n", numPoints);
+  printf("\n\n\n\n\n\n%d points\n", numPoints);
   printf("%d background points\n", numBackgrounds);
   printf("%d clusters\n", numClusters);
   
@@ -398,10 +410,15 @@ void processClusters( LaserScan *scan)
 
   
 
+  // Theoretical max at our canbus speed is around 8000 messages/sec. 
+  // We scan at 2hz, so 4000 clusters/scan is the max, a sensible limit is more like 1000 clusters/scan
+  // I doubt we will ever get there but I'll drop clusters after 1000 anyway
+  int numC = 0;
   sendCanStart(true);
   for(Cluster c:clusters)
   {
-    sendCanPerson(c.angle(), c.width(), c.meanRange());
+    if( numC++ < 1000)
+      sendCanPerson(c.angle(), c.width(), c.meanRange());
 
     printf("  angle %0.4f (%f to %f) rad width %0.4fm range %0.2fm background at %0.2fm\n", c.angle(), c.startAngle, c.endAngle, c.width(), c.meanRange(), c.backgroundRange());
     if( n++ > 20 )
@@ -417,7 +434,7 @@ void processClusters( LaserScan *scan)
 
 void processScan( LaserScan *scan)
 {
-  printf("processScan\n");
+  if( traceClusters) printf("processScan\n");
   numClusters = 0;
   
   processBackground(scan);
@@ -568,7 +585,7 @@ int main(int argc, char *argv[]) {
 
   if( true)
   {
-    frequency = 5.0; // for tg30
+    frequency = 3.0; // actually gets us 2hz on TG30, which is about what we want
   }
   else
   {
